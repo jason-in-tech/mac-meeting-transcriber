@@ -6,6 +6,10 @@ person isn't the first one to speak), we give an LLM a handful of
 representative utterances per speaker and ask it to match against a list
 of candidate names.
 
+Also hosts the shared ``LLMConfig`` and a cheap ``ping_llm_endpoint``
+helper used by both ``polish`` and ``identify`` to decide whether the
+LLM is reachable.
+
 Designed to talk to any OpenAI-compatible endpoint, including the local
 Cursor proxy at http://127.0.0.1:8765/v1.
 """
@@ -13,8 +17,10 @@ Cursor proxy at http://127.0.0.1:8765/v1.
 import json
 import os
 import re
+import socket
 from collections.abc import Iterable
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from openai import OpenAI
 
@@ -107,6 +113,72 @@ def resolve_llm_config(
         or DEFAULT_MODEL
     )
     return LLMConfig(base_url=base_url, api_key=api_key, model=model)
+
+
+@dataclass
+class PingResult:
+    """Outcome of a cheap LLM-endpoint reachability check."""
+
+    reachable: bool
+    detail: str
+
+
+def ping_llm_endpoint(llm: LLMConfig, timeout: float = 0.5) -> PingResult:
+    """Check whether ``llm.base_url`` is reachable, fast.
+
+    We do *not* actually call ``/v1/chat/completions`` — that would burn
+    tokens and is too slow to use as a "should we even try" gate. Instead
+    we open a TCP socket to ``host:port`` and call it a day. This catches
+    the most common "auto-skip" case: the user doesn't have a local LLM
+    proxy running (Cursor, Ollama, vLLM, ...).
+
+    What this *does* detect:
+      - DNS / hostname resolution failure (offline laptop, typo in URL)
+      - "connection refused" (port closed, no proxy running)
+      - TCP timeout (firewall, unreachable host)
+
+    What this *doesn't* detect:
+      - 401 / 403 from the LLM (auth wrong) — but ``polish`` already has
+        per-batch fallback, so a polished pipeline that fails 100% of
+        batches still returns the unpolished transcript.
+      - Endpoint is up but the requested model name doesn't exist —
+        same fallback applies.
+
+    Args:
+        llm: Resolved LLM connection settings (we only read ``base_url``).
+        timeout: TCP connect timeout in seconds. Default 0.5s — plenty for
+            a localhost proxy and short enough that an offline run isn't
+            visibly delayed.
+
+    Returns:
+        ``PingResult(reachable=True, detail="<host>:<port>")`` on success,
+        or ``PingResult(reachable=False, detail="<reason>")`` otherwise.
+    """
+    try:
+        parsed = urlparse(llm.base_url)
+    except Exception as exc:
+        return PingResult(reachable=False, detail=f"unparseable base_url: {exc}")
+
+    host = parsed.hostname
+    if not host:
+        return PingResult(reachable=False, detail=f"no host in base_url {llm.base_url!r}")
+
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    elif parsed.scheme == "http":
+        port = 80
+    else:
+        return PingResult(reachable=False, detail=f"unknown scheme {parsed.scheme!r}")
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return PingResult(reachable=True, detail=f"{host}:{port}")
+    except TimeoutError as exc:
+        return PingResult(reachable=False, detail=f"timeout connecting to {host}:{port} ({exc})")
+    except OSError as exc:
+        return PingResult(reachable=False, detail=f"cannot reach {host}:{port} ({exc})")
 
 
 def _distinct_speakers(segments: Iterable[AttributedSegment]) -> list[str]:

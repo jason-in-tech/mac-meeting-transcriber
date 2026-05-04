@@ -19,8 +19,18 @@ Usage:
     mmt INPUT.m4a --chinese-script simplified    # normalize Chinese output (default: simplified, or $MMT_CHINESE_SCRIPT)
     mmt INPUT.m4a --initial-prompt "..."         # Whisper decoding bias (default: auto when --language zh)
     mmt INPUT.m4a --no-initial-prompt            # disable default Chinese-meeting prompt
-    mmt INPUT.m4a --no-polish                    # skip the LLM copy-edit pass
+    mmt INPUT.m4a --no-polish                    # force-skip the LLM copy-edit pass
+    mmt INPUT.m4a --require-polish               # hard-fail if the LLM endpoint is unreachable
     mmt INPUT.m4a --glossary ./glossary.md       # anchor polish with a custom glossary
+
+LLM behavior:
+    Polish defaults to "auto": we ping the LLM endpoint with a short TCP
+    probe before transcribing; if reachable, polish runs. If unreachable
+    (no Cursor app, no Ollama running, offline laptop, ...), polish is
+    silently skipped and you get raw Whisper output. Pass --require-polish
+    to make "unreachable" a hard error (exit 4) instead.
+    Speaker identification (only when --speakers is set) follows the same
+    probe — on unreachable endpoint it falls back to positional mapping.
 
 LLM configuration (shared by --speakers identification and polish):
     --llm-model MODEL            # default: gpt-5.4-medium (via Cursor proxy)
@@ -31,6 +41,11 @@ LLM configuration (shared by --speakers identification and polish):
     $MMT_OUTPUT_DIR              # override default output directory
     $MMT_INITIAL_PROMPT          # default Whisper decoding prompt
     $MMT_PRIMARY_LANGUAGE        # 'en' (default), 'zh' (picks BELLE), or 'auto'
+
+Exit codes:
+    0   success
+    2   bad CLI usage (mutually exclusive flags, missing input, etc.)
+    4   --require-polish set but LLM endpoint unreachable
 """
 
 import argparse
@@ -52,6 +67,7 @@ from .identify import (
     LLMConfig,
     identify_speakers,
     parse_candidates,
+    ping_llm_endpoint,
     resolve_llm_config,
 )
 from .merge import collapse_consecutive, merge_transcript_with_speakers
@@ -151,10 +167,14 @@ def _resolve_speaker_aliases(
     """Figure out the SPEAKER_XX → real-name map.
 
     Precedence:
-      - --no-identify        : skip naming entirely (keep SPEAKER_XX).
-      - --speakers-positional: deterministic first-appearance mapping.
-      - default              : ask the LLM. On failure, fall back to positional
-                               (better than silently returning SPEAKER_XX).
+      - ``use_llm=False``    : skip naming entirely (keep SPEAKER_XX).
+                               Triggered by --no-identify or by no --speakers.
+      - ``use_positional``   : deterministic first-appearance mapping. Used
+                               for --speakers-positional and as the auto
+                               fallback when the LLM endpoint is unreachable.
+      - default              : ask the LLM. On per-call failure, falls back
+                               to positional internally (better than silently
+                               returning SPEAKER_XX).
     """
     if not raw_names or not use_llm:
         return None
@@ -329,9 +349,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-polish",
         action="store_true",
-        help="Skip the LLM copy-edit pass that fixes capitalization, "
-             "punctuation, and glossary terms. Useful if the LLM "
-             "endpoint is unavailable or you want raw Whisper text.",
+        help="Skip the LLM copy-edit pass entirely (force raw Whisper output). "
+             "Default behavior is auto: polish runs if the LLM endpoint is "
+             "reachable, and is silently skipped otherwise.",
+    )
+    parser.add_argument(
+        "--require-polish",
+        action="store_true",
+        help="Hard-require the LLM polish pass: if the endpoint is "
+             "unreachable, exit 4 instead of silently skipping. "
+             "Use this in CI / scripts where you want a guaranteed "
+             "polished transcript. Conflicts with --no-polish.",
     )
     parser.add_argument(
         "--glossary",
@@ -395,6 +423,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "error: --no-polish and --glossary are mutually exclusive "
             "(a glossary only matters during the polish pass).",
+            file=sys.stderr,
+        )
+        return 2
+    if args.no_polish and args.require_polish:
+        print(
+            "error: --no-polish and --require-polish are mutually exclusive "
+            "(pick one polish behavior).",
             file=sys.stderr,
         )
         return 2
@@ -503,6 +538,43 @@ def main(argv: list[str] | None = None) -> int:
             "(pass --no-initial-prompt to disable)"
         )
 
+    # Resolve LLM config and probe reachability BEFORE ASR — that way
+    # --require-polish fails fast in <1 second instead of waiting 9 minutes
+    # for transcription to finish, and the auto-skip decision is logged
+    # up front so the user knows what's coming.
+    polish_requested = not args.no_polish
+    identify_requested = bool(args.speakers) and not args.no_identify and not args.speakers_positional
+    llm_config: LLMConfig | None = None
+    needs_polish = polish_requested
+    needs_identify = identify_requested
+    fallback_speakers_to_positional = False
+
+    if polish_requested or identify_requested:
+        llm_config = resolve_llm_config(args.llm_base_url, args.llm_api_key, args.llm_model)
+        log(f"LLM endpoint {llm_config.base_url} with model {llm_config.model}")
+
+        ping = ping_llm_endpoint(llm_config)
+        if ping.reachable:
+            log(f"  endpoint reachable at {ping.detail}")
+        else:
+            if args.require_polish:
+                print(
+                    f"error: --require-polish set but LLM endpoint is unreachable "
+                    f"({ping.detail}). Start your LLM proxy or pass --no-polish.",
+                    file=sys.stderr,
+                )
+                return 4
+            if polish_requested:
+                log(
+                    f"LLM endpoint unreachable ({ping.detail}); "
+                    "polish will be skipped (raw Whisper output)."
+                )
+                needs_polish = False
+            if identify_requested:
+                log("  speaker identification will degrade to positional mapping.")
+                needs_identify = False
+                fallback_speakers_to_positional = True
+
     # Senko needs 16kHz mono 16-bit WAV, so we make one canonical copy
     # and feed it to both Whisper and Senko for perfectly aligned timing.
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -559,16 +631,9 @@ def main(argv: list[str] | None = None) -> int:
             attributed = collapse_consecutive(attributed)
         log(f"  {len(attributed)} final paragraphs")
 
-    # Resolve the LLM config once and share it between polish + identify,
-    # so both stages log the same endpoint/model and we don't re-read env
-    # vars mid-run.
-    needs_polish = not args.no_polish
-    needs_identify = bool(args.speakers) and not args.no_identify and not args.speakers_positional
-    llm_config: LLMConfig | None = None
-    if needs_polish or needs_identify:
-        llm_config = resolve_llm_config(args.llm_base_url, args.llm_api_key, args.llm_model)
-        log(f"LLM endpoint {llm_config.base_url} with model {llm_config.model}")
-
+    # ``needs_polish`` / ``needs_identify`` / ``fallback_speakers_to_positional``
+    # were already decided up front (before ASR ran) based on the LLM endpoint
+    # ping. We only act on those decisions here.
     if needs_polish:
         glossary_text, glossary_path = resolve_glossary(args.glossary)
         if glossary_path:
@@ -611,11 +676,20 @@ def main(argv: list[str] | None = None) -> int:
     if len(attributed) != before:
         log(f"Post-polish filter: dropped {before - len(attributed)} empty/hallucinated segment(s)")
 
+    # ``needs_identify`` was already toggled off above if the LLM endpoint
+    # turned out to be unreachable — respect that decision here.
+    #
+    # Two LLM-skip paths land in this function:
+    #   - User asked for LLM identify, endpoint unreachable, but they
+    #     gave us --speakers names → degrade to positional mapping.
+    #   - User asked for LLM identify, no --speakers names → leave the
+    #     anonymous SPEAKER_XX labels in place.
+    use_positional_now = args.speakers_positional or fallback_speakers_to_positional
     aliases = _resolve_speaker_aliases(
         raw_names=args.speakers,
         segments=attributed,
-        use_llm=not args.no_identify,
-        use_positional=args.speakers_positional,
+        use_llm=needs_identify or use_positional_now,
+        use_positional=use_positional_now,
         llm=llm_config,
         log=log,
     )

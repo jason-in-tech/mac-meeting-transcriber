@@ -10,6 +10,8 @@
 
 A 60-minute Mandarin-English meeting on an M4 Pro becomes a speaker-attributed Markdown file in **~12 minutes** (cold) or **~3 minutes** (warm cache). ASR + diarization run 100% locally; LLM polish and speaker identification are optional and use any OpenAI-compatible endpoint.
 
+**Polish auto-detects.** If the configured LLM endpoint is reachable, polish runs (capitalizing technical terms, fixing punctuation, normalizing Cantonese particles to Mandarin). If it's not — no Cursor app, no Ollama, offline laptop — polish is silently skipped and you get raw Whisper output. No flag tuning required.
+
 ```bash
 mmt recording.m4a --speakers "Alex:engineer,Pat:manager"
 # → ./transcripts/recording.md
@@ -73,10 +75,11 @@ Everything is one CLI command, with sensible defaults and a thorough cache so re
 - **Apple Silicon native.** MLX Whisper on the GPU, Senko diarization on the Neural Engine.
 - **Robust language handling.** Built-in Chinese decoding bias, Cantonese-particle sweep, OpenCC Traditional → Simplified, configurable script targets.
 - **Smart caching.** Transcript is cached by `(audio + model + language + initial-prompt)`. Re-running with new polish/glossary/speaker settings reuses the cached transcript and skips Whisper entirely.
-- **Optional LLM polish + speaker ID.** Use any OpenAI-compatible endpoint; defaults to the local Cursor proxy. Both stages can be disabled for fully offline runs.
+- **Auto-detected LLM polish.** Default behavior pings the configured endpoint with a 0.5 s TCP probe before transcribing. Reachable → polish runs. Unreachable → silently skipped, no flag needed. Use `--require-polish` to flip "unreachable" into a hard error (exit 4) for CI / scripts.
+- **Optional speaker identification.** Pass `--speakers "Alex,Pat,..."` to map `SPEAKER_00` / `SPEAKER_01` to real names; degrades to positional mapping if the LLM endpoint is unreachable.
 - **Glossary-aware.** Inject project-specific vocabulary into the polish prompt via flag, env var, or `~/.config/mac-meeting-transcriber/glossary.md`.
 - **Streamable.** Output to a file, a directory, or stdout (`-o -`).
-- **113 unit tests, ruff-clean, runs in CI.**
+- **123 unit tests, ruff-clean, runs in CI.**
 
 ## Requirements
 
@@ -100,14 +103,19 @@ uv sync
 ## Quickstart
 
 ```bash
-# Basic run — writes to $MMT_OUTPUT_DIR/<stem>.md, defaulting to ./transcripts/<stem>.md
+# Basic run — polish runs if LLM endpoint is up, skipped otherwise.
+# Writes to $MMT_OUTPUT_DIR/<stem>.md, defaulting to ./transcripts/<stem>.md
 mmt recording.m4a
 
-# Recommended — name speakers with role hints
+# Name speakers (LLM identifies; falls back to positional if endpoint is down)
 mmt recording.m4a --speakers "Alex:IC,Pat:manager" -v
 
-# Fully offline (no LLM polish, no LLM speaker ID)
-mmt recording.m4a --no-polish --no-identify
+# Force-skip polish even if endpoint is reachable (raw Whisper output)
+mmt recording.m4a --no-polish
+
+# CI / scripts — fail fast (exit 4) if endpoint is unreachable instead of
+# silently producing raw Whisper output
+mmt recording.m4a --require-polish
 
 # Output anywhere
 mmt recording.m4a -o ~/Docs/meeting.md      # explicit file
@@ -126,7 +134,8 @@ mmt recording.m4a --glossary ~/configs/glossary.md
 ## Common flags
 
 ```text
---no-polish                          # skip LLM copy-edit (fully offline)
+--no-polish                          # force-skip LLM copy-edit (raw Whisper output)
+--require-polish                     # fail fast (exit 4) if LLM endpoint unreachable
 --no-identify                        # keep anonymous SPEAKER_XX labels
 --no-cache                           # force a fresh transcription
 --glossary PATH                      # project-specific vocabulary
@@ -141,6 +150,19 @@ mmt recording.m4a --glossary ~/configs/glossary.md
 --llm-api-key KEY                    # override LLM API key
 -v / --verbose                       # show timings and pipeline stage logs
 ```
+
+### Default polish behavior — auto-detect
+
+`mmt` resolves the LLM endpoint, fires a 0.5 s TCP probe, and decides:
+
+| LLM endpoint   | Default behavior                                               | With `--require-polish`            |
+| -------------- | -------------------------------------------------------------- | ---------------------------------- |
+| Reachable      | Polish runs                                                    | Polish runs                        |
+| Unreachable    | Polish silently skipped, raw Whisper output                    | Exit 4 with a clear error message  |
+
+The probe runs **before** ASR, so a misconfigured endpoint doesn't make you wait through 9 minutes of transcription before you find out. The "auto-skip" log line names the host and port so you can quickly tell whether your local proxy crashed or you typoed `MMT_LLM_BASE_URL`.
+
+If you also passed `--speakers "Alex,Pat,..."`, an unreachable endpoint degrades speaker identification to positional mapping (first-appearance order) instead of leaving anonymous `SPEAKER_XX` labels.
 
 ## Language detection trap
 
@@ -293,7 +315,7 @@ mac-meeting-transcriber/
 
 - **No telemetry.** The tool never phones home or reports usage.
 - **Audio stays local for ASR + diarization.** No upload, no third-party processing.
-- **Polish + speaker-ID send transcript text to your configured LLM endpoint.** This is your choice — point it at a local Ollama / vLLM / llama.cpp server, or run with `--no-polish --no-identify` for a fully offline pipeline.
+- **Polish + speaker-ID send transcript text to your configured LLM endpoint** when reachable. By default `mmt` probes the endpoint with a 0.5 s TCP connect first; if it's unreachable, polish is silently skipped and nothing leaves your machine. To guarantee no transcript text is ever sent to an external endpoint regardless of what's running locally, point `MMT_LLM_BASE_URL` at a local LLM server (Ollama, vLLM, llama.cpp) or pass `--no-polish`.
 - **No glossary or recording metadata is committed back to anywhere.** The cache is purely on-disk in `~/.cache/`.
 
 If your meeting content is sensitive, the recommended setup is a local LLM:
@@ -308,7 +330,10 @@ mmt recording.m4a
 ## FAQ
 
 **Why is the default LLM endpoint `http://127.0.0.1:8765/v1`?**
-That's the Cursor desktop app's local proxy. If you're not running Cursor, override `MMT_LLM_BASE_URL` to point at OpenAI / Ollama / etc. The pipeline works fine with any OpenAI-compatible API.
+That's the Cursor desktop app's local proxy. If you're not running Cursor, override `MMT_LLM_BASE_URL` to point at OpenAI / Ollama / etc. The pipeline works fine with any OpenAI-compatible API. And if you don't override it and Cursor isn't running, the auto-detect just skips polish and gives you raw Whisper output — no error, no flag tuning needed.
+
+**The auto-skip happened but I want polish — why didn't it run?**
+Run with `-v`. The auto-skip log line names the host and port and the exact reason (`connection refused`, `timeout`, `cannot reach`, …). Either start the local proxy (open Cursor / `ollama serve`), or fix `MMT_LLM_BASE_URL`, or pass `--require-polish` next time so a misconfigured endpoint is loud instead of silent.
 
 **Why Python 3.13?**
 Pure preference (cleaner `from datetime import UTC` etc.). Dropping back to 3.11 is straightforward — most of the type hints already use the modern union syntax, and the only 3.13-specific stdlib usage is in tests.

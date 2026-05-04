@@ -10,7 +10,7 @@ Pipeline:
     4. formatter — render Markdown meeting transcript
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .diarize import diarize_audio
 from .formatter import render_markdown, save_markdown
@@ -18,8 +18,10 @@ from .identify import (
     Candidate,
     IdentificationResult,
     LLMConfig,
+    PingResult,
     identify_speakers,
     parse_candidates,
+    ping_llm_endpoint,
     resolve_llm_config,
 )
 from .merge import collapse_consecutive, merge_transcript_with_speakers
@@ -44,11 +46,13 @@ __all__ = [
     "save_markdown",
     "identify_speakers",
     "parse_candidates",
+    "ping_llm_endpoint",
     "resolve_llm_config",
     "polish_transcript",
     "resolve_glossary",
     "Candidate",
     "IdentificationResult",
     "LLMConfig",
+    "PingResult",
     "PolishResult",
 ]

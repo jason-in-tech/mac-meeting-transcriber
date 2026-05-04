@@ -1,0 +1,91 @@
+[project]
+name = "mac-meeting-transcriber"
+version = "0.1.0"
+description = "Fast on-device meeting transcription with speaker diarization, optimized for Apple Silicon (M1–M4). MLX Whisper + Senko (pyannote/CAM++) + optional LLM polish and speaker identification."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [
+    { name = "Jason Li", email = "jason-in-tech@users.noreply.github.com" },
+]
+keywords = [
+    "whisper",
+    "mlx",
+    "transcription",
+    "diarization",
+    "speaker-identification",
+    "apple-silicon",
+    "macos",
+    "meeting",
+    "asr",
+    "senko",
+    "pyannote",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mlx-whisper>=0.4.3",
+    "senko @ git+https://github.com/narcotic-sh/senko.git",
+    "soundfile>=0.12.1",
+    "numpy>=2.0.0",
+    "static-ffmpeg>=3.0",
+    "openai>=1.50.0",
+    "opencc>=1.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/jason-in-tech/mac-meeting-transcriber"
+Repository = "https://github.com/jason-in-tech/mac-meeting-transcriber"
+Issues = "https://github.com/jason-in-tech/mac-meeting-transcriber/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+mac-meeting-transcriber = "mac_meeting_transcriber.__main__:main"
+mmt = "mac_meeting_transcriber.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mac_meeting_transcriber"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = [
+    "E501",
+    "B008",
+]

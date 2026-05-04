@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- uv / venv ---
+.venv/
+venv/
+env/
+uv.lock.bak
+.python-version
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Runtime artifacts (user-generated transcripts, audio files, models) ---
+output/
+transcripts/
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.flac
+
+# Never commit accidentally-generated transcripts at the repo root
+/transcript*.md
+/transcript*.txt
+!examples/sample_output.md
+
+# --- Models / large caches ---
+.cache/
+models/
+mlx-models/
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*
+*.env
+glossary.md
+glossary.local.md
